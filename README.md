@@ -11,7 +11,7 @@ Justin Thomas Bijoy (7123550)
 The first part of the assignment involved writing the inital program, and instrumenting it. The Part 1/ folder contains an IntelliJ project with the following src files:
 
 ### Server.java
-This is the server program that constanly listens for incoming socket connections. When there is a new connection, it is passed to a thread pool to perform the folder transfer, while the server can continue to listen for new connections.
+This is the server program that constantly listens for incoming socket connections. When there is a new connection, it is passed to a thread pool to perform the folder transfer, while the server can continue to listen for new connections.
 
 #### Compile
 While inside the Part 1/ folder
@@ -51,6 +51,7 @@ javac -d build src/GenerateFiles.java
 ```bash
 java -cp build GenerateFiles <Name of Folder to Place Generated Files>
 ```
+
 
 
 
