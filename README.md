@@ -4,6 +4,7 @@ This assignment tasked us with creating a Client-Server program that is intrumen
 
 ## Authours
 Geoffrey Jensen (7148710)
+
 Justin Thomas Bijoy (7123550)
 
 ## Part 1
@@ -50,6 +51,7 @@ javac -d build src/GenerateFiles.java
 ```bash
 java -cp build GenerateFiles <Name of Folder to Place Generated Files>
 ```
+
 
 
 
