@@ -2,6 +2,10 @@
 
 This assignment tasked us with creating a Client-Server program that is intrumented with OpenTelemetry. The program itself involves the Client sending a folder of files to the Sevrer, so we can get experiance with distributed tracing.
 
+## Authours
+Geoffrey Jensen (7148710)
+Justin Thomas Bijoy (7123550)
+
 ## Part 1
 The first part of the assignment involved writing the inital program, and instrumenting it. The Part 1/ folder contains an IntelliJ project with the following src files:
 
@@ -46,6 +50,7 @@ javac -d build src/GenerateFiles.java
 ```bash
 java -cp build GenerateFiles <Name of Folder to Place Generated Files>
 ```
+
 
 
 
