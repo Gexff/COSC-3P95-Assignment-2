@@ -44,6 +44,14 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.zip.InflaterOutputStream;
 
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.common.Attributes;
+
 public class FolderTransferRequest implements Runnable {
     Socket client;
     ObjectInputStream oInputStream;
@@ -51,6 +59,17 @@ public class FolderTransferRequest implements Runnable {
     DataInputStream dInputStream;
     Cipher cipher;
     String SESSION_ID;
+
+    private static final Tracer tracer = GlobalOpenTelemetry.getTracer("COSC3P95.Server");
+    private static final Meter meter = GlobalOpenTelemetry.meterBuilder("COSC3P95.Server").build();
+    private static final LongCounter filesReceivedCounter = meter
+            .counterBuilder("files_received_total")
+            .setDescription("Total number of files successfully received")
+            .build();
+    private static final LongCounter checksumFailCounter = meter
+            .counterBuilder("checksum_failures_total")
+            .setDescription("Number of files where checksum verification failed")
+            .build();
 
     public FolderTransferRequest(Socket client) throws IOException, NoSuchPaddingException, NoSuchAlgorithmException, InvalidAlgorithmParameterException, InvalidKeyException {
         oInputStream = new ObjectInputStream(client.getInputStream());
@@ -163,27 +182,36 @@ public class FolderTransferRequest implements Runnable {
 
     private boolean compareChecksums(byte[] clientDigest, byte[] serverDigest) {
         // SPAN: Start
-        if (clientDigest.length == serverDigest.length) {
-            for (int i = 0; i < clientDigest.length; i++) {
-                if (clientDigest[i] != serverDigest[i]){
-                    // SPAN: End
-                    return false;
-                }
-            }
-        } else {
+
+        Span span = tracer.spanBuilder("checksum.compare").startSpan();
+        boolean result = false;
+        try {
+            result = MessageDigest.isEqual(clientDigest, serverDigest);
             // SPAN: End
-            return false;
+        } catch (Exception e) {
+            span.recordException(e);
+        } finally {
+            span.setAttribute("checksum.result", result);
+            span.end();
         }
         // SPAN: End
-        return true;
+        return result;
     }
 
     private byte[] readChecksum(DataInputStream dInputStream) throws IOException {
         // SPAN: Start
 
-        int length = dInputStream.readInt();
-        byte[] digest = new byte[length];
-        dInputStream.read(digest, 0, length);
+        Span span = tracer.spanBuilder("read.checksum").startSpan();
+        byte[] digest;
+        try {
+            int length = dInputStream.readInt();
+            digest = new byte[length];
+            dInputStream.read(digest, 0, length);
+            span.setAttribute("checksum.length", length);
+            span.addEvent("Checksum read from client");
+        } finally {
+            span.end();
+        }
         return digest;
 
         // SPAN: End
@@ -192,15 +220,23 @@ public class FolderTransferRequest implements Runnable {
     private void writeToFile(byte[] rawData, String file, MessageDigest md) throws IOException {
         // SPAN: Start
 
+        Span span = tracer.spanBuilder("write.file").startSpan();
         ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(rawData);
         try(DigestInputStream digestInputStream = new DigestInputStream(byteArrayInputStream, md);
             FileOutputStream fileOutputStream = new FileOutputStream(file))
         {
             byte[] buffer = new byte[Server.BUFFER_SIZE];
             int bytes;
+            span.addEvent("Writing data to " + file);
             while ((bytes = digestInputStream.read(buffer)) != -1) {
                 fileOutputStream.write(buffer, 0, bytes);
             }
+            span.addEvent("Write complete");
+        } catch (IOException e) {
+            span.recordException(e);
+            throw e;
+        } finally {
+            span.end();
         }
 
         // SPAN: End
@@ -209,12 +245,17 @@ public class FolderTransferRequest implements Runnable {
     private byte[] decompress(byte[] data) {
         // SPAN: Start
 
+        Span span = tracer.spanBuilder("decompress.data").startSpan();
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
         try(InflaterOutputStream inflaterOutputStream = new InflaterOutputStream(byteArrayOutputStream))
         {
             inflaterOutputStream.write(data);
+            span.addEvent("Decompression finished");
         } catch (IOException e) {
             e.printStackTrace();
+            span.recordException(e);
+        } finally {
+            span.end();
         }
 
         // SPAN: End
@@ -228,8 +269,12 @@ public class FolderTransferRequest implements Runnable {
         try(CipherOutputStream cipherOutputStream = new CipherOutputStream(byteArrayOutputStream, cipher))
         {
             cipherOutputStream.write(data);
+            span.addEvent("Decryption complete");
         } catch (IOException e) {
             e.printStackTrace();
+            span.recordException(e);
+        } finally {
+            span.end();
         }
 
         // SPAN: End
@@ -237,15 +282,24 @@ public class FolderTransferRequest implements Runnable {
     }
 
     private byte[] readData(DataInputStream dInputStream, int length) throws IOException {
+        Span span = tracer.spanBuilder("read.data").startSpan();
         byte[] retrievedData = new byte[length];
 
         // Read data
         int totalRead = 0;
         int read;
-        while(totalRead < length && (read = dInputStream.read(retrievedData, totalRead, length - totalRead)) != -1){
-            totalRead += read;
+        try {
+            while(totalRead < length && (read = dInputStream.read(retrievedData, totalRead, length - totalRead)) != -1) {
+                totalRead += read;
+            }
+            span.setAttribute("bytes.read", totalRead);
+        } catch (IOException e) {
+            e.printStackTrace();
+            span.recordException(e);
+            throw e;
+        } finally {
+            span.end();
         }
-
         return retrievedData;
     }
 }

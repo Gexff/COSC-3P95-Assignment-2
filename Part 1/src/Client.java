@@ -49,6 +49,13 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.zip.DeflaterOutputStream;
 
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.DoubleHistogram;
+
 public class Client {
     ObjectInputStream oInputStream;
     ObjectOutputStream oOutputStream;
@@ -57,6 +64,24 @@ public class Client {
     ByteArrayOutputStream byteArrayOutputStream;
 
     static String SESSION_ID;
+
+    private static final Tracer tracer =
+        GlobalOpenTelemetry.getTracer("file-transfer");
+
+    private static final Meter meter =
+        GlobalOpenTelemetry.getMeter("file-transfer-metrics");
+
+    private static final LongCounter filesTransferred =
+        meter.counterBuilder("files_transferred_total")
+                .setUnit("files")
+                .setDescription("Number of files successfully sent")
+                .build();
+
+    private static final DoubleHistogram compressionRatioHistogram =
+        meter.histogramBuilder("compression_ratio")
+                .setDescription("Ratio before/after compression")
+                .setUnit("ratio")
+                .build();
 
     public Client(String host, int portNumber, String folderPath) throws Exception {
         File folder = new File(folderPath);
@@ -128,6 +153,8 @@ public class Client {
 
     private void sendChecksum(DataOutputStream dOutputStream, MessageDigest md) throws IOException {
         // SPAN: Start
+        Span span = tracer.spanBuilder("send_checksum").startSpan();
+        span.addEvent("checksum.start");
 
         // Send length of digest and contents
         byte[] digest = md.digest();
@@ -135,21 +162,32 @@ public class Client {
         dOutputStream.write(digest, 0, digest.length);
         dOutputStream.flush();
 
+        span.setAttribute("checksum.length", digest.length);
+        span.addEvent("checksum.end");
+        span.end();
         // SPAN: End
     }
 
     private void sendData(DataOutputStream dOutputStream, byte[] data) throws IOException {
         // SPAN: Start
+        Span span = tracer.spanBuilder("send_data")
+                .setAttribute("data.size.bytes", data.length)
+                .startSpan();
+        span.addEvent("sending.start");
 
         // Send data length and contents
         dOutputStream.writeInt(data.length);
         dOutputStream.write(data);
 
+        span.addEvent("sending.end");
+        span.end();
         // SPAN: End
     }
 
     private byte[] encrypt(byte[] data, Cipher cipher) {
         // SPAN: Start
+        Span span = tracer.spanBuilder("encrypt_file").startSpan();
+        span.addEvent("encryption.start");
 
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
         try(CipherOutputStream cipherOutputStream = new CipherOutputStream(byteArrayOutputStream, cipher))
@@ -157,14 +195,22 @@ public class Client {
             cipherOutputStream.write(data);
         } catch (IOException e) {
             e.printStackTrace();
+            span.recordException(e);
         }
 
+        span.addEvent("encryption.end");
+        span.end();
         // SPAN: End
         return byteArrayOutputStream.toByteArray();
     }
 
     private byte[] compress(byte[] data, MessageDigest md) {
         // SPAN: Start
+
+        Span span = tracer.spanBuilder("compress_file")
+                .setAttribute("original_size.bytes", data.length)
+                .startSpan();
+        span.addEvent("compression.start");
 
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
         try(DeflaterOutputStream deflaterOutputStream = new DeflaterOutputStream(byteArrayOutputStream);
@@ -174,7 +220,19 @@ public class Client {
             deflaterOutputStream.finish();
         } catch (IOException e) {
             e.printStackTrace();
+            span.recordException(e);
         }
+
+        byte[] compressed = byteArrayOutputStream.toByteArray();
+        double ratio = (double)data.length / (double)compressed.length;
+
+        span.setAttribute("compressed_size.bytes", compressed.length);
+        span.setAttribute("compression.ratio", ratio);
+        compressionRatioHistogram.record(ratio);
+
+        span.addEvent("compression.end");
+        span.end();
+        return compressed;
 
         // SPAN: End
         return byteArrayOutputStream.toByteArray();
