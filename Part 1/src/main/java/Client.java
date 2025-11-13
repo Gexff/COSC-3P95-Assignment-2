@@ -12,7 +12,7 @@
  *
  * The transfer protocol is as follows:
  *
- *  1.) Server sends the SESSION_ID to the client.
+ *  1.) Server sends the TRACE_ID and SPAN_ID to the client.
  *
  *  2.) Client sends the name of the folder to store the transferred files in to the server as a String object.
  *
@@ -34,6 +34,7 @@
  *      vii.) The server compares the checksum from the client to the checksum it calculates from the received data.
  */
 
+
 import javax.crypto.Cipher;
 import javax.crypto.CipherOutputStream;
 import javax.crypto.SecretKey;
@@ -49,12 +50,17 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.zip.DeflaterOutputStream;
 
-import io.opentelemetry.api.GlobalOpenTelemetry;
-import io.opentelemetry.api.trace.Span;
-import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.trace.*;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.DoubleHistogram;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
+import io.opentelemetry.sdk.resources.Resource;
+import io.opentelemetry.sdk.trace.samplers.Sampler;
 
 public class Client {
     ObjectInputStream oInputStream;
@@ -63,13 +69,25 @@ public class Client {
     Cipher cipher;
     ByteArrayOutputStream byteArrayOutputStream;
 
-    static String SESSION_ID;
+    private static final OtlpGrpcSpanExporter exporter = OtlpGrpcSpanExporter.builder()
+            .setEndpoint("http://localhost:4317")
+            .build();
+
+    private static final SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+            .addSpanProcessor(BatchSpanProcessor.builder(exporter).build())
+            .setResource(Resource.getDefault().toBuilder().put("service.name", "COSC3P95-Part1").build())
+            .setSampler(Sampler.alwaysOn())
+            .build();
+
+    private static final OpenTelemetrySdk openTelemetry = OpenTelemetrySdk.builder()
+            .setTracerProvider(tracerProvider)
+            .build();
 
     private static final Tracer tracer =
-        GlobalOpenTelemetry.getTracer("file-transfer");
+            openTelemetry.getTracer("file-transfer");
 
     private static final Meter meter =
-        GlobalOpenTelemetry.getMeter("file-transfer-metrics");
+            openTelemetry.getMeter("file-transfer-metrics");
 
     private static final LongCounter filesTransferred =
         meter.counterBuilder("files_transferred_total")
@@ -82,6 +100,9 @@ public class Client {
                 .setDescription("Ratio before/after compression")
                 .setUnit("ratio")
                 .build();
+
+    static Span parentSpan;
+    static Span fileSpan;
 
     public Client(String host, int portNumber, String folderPath) throws Exception {
         File folder = new File(folderPath);
@@ -107,26 +128,42 @@ public class Client {
             IvParameterSpec ivParameterSpec = new IvParameterSpec(Server.IV);
             cipher.init(Cipher.ENCRYPT_MODE, key, ivParameterSpec);
 
-            // Receive SESSION_ID
-            SESSION_ID = (String) oInputStream.readObject();
+            // Receive TRACE_ID and SPAN_ID
+            String traceId = (String) oInputStream.readObject();
+            String spanId = (String) oInputStream.readObject();
+
+            parentSpan = Span.wrap(SpanContext.createFromRemoteParent(traceId,
+                            spanId, TraceFlags.getSampled(), TraceState.getDefault()));
 
             // Send folder name
             oOutputStream.writeObject(folderName);
+            parentSpan.addEvent("Sent folder name");
 
             // Create ArrayList of file names
             ArrayList<String> fileNames = new ArrayList<>();
             for (File file : files){
                 fileNames.add(file.getName());
             }
+            parentSpan.addEvent("Sent ArrayList of file names");
 
             // Send ArrayList of file names
             oOutputStream.writeObject(fileNames);
 
             MessageDigest md = MessageDigest.getInstance("MD5");
 
+            int number = 1;
             for(File file : files){
-                // Read file into memory
-                byte[] data = Files.readAllBytes(file.toPath());
+                fileSpan = tracer.spanBuilder("single_file_transfer")
+                        .setParent(Context.current().with(parentSpan))
+                        .setSpanKind(SpanKind.CLIENT)
+                        .setAttribute("File.name", file.getName())
+                        .setAttribute("File.size", file.length())
+                        .setAttribute("File.number", number++)
+                        .startSpan();
+
+                oOutputStream.writeObject(fileSpan.getSpanContext().getSpanId());
+
+                byte[] data = readFile(file);
 
                 if(Server.USE_ADVANCED_FEATURES){
                     byte[] compressedData = compress(data, md);
@@ -138,22 +175,46 @@ public class Client {
                     sendData(dOutputStream, data);
                 }
 
+                String sync = (String) oInputStream.readObject();
+
                 System.out.println("Finished transferring: " + file.getName() + ", Size: " + file.length());
+
+                fileSpan.end();
             }
 
             oOutputStream.close();
             dOutputStream.close();
-
         } catch (UnknownHostException e) {
             e.printStackTrace();
         } catch (IOException e) {
             e.printStackTrace();
+        } finally {
+            openTelemetry.getSdkTracerProvider().shutdown();
         }
     }
 
+    private byte[] readFile(File file) {
+        Span span = tracer.spanBuilder("read_file")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.CLIENT)
+                .startSpan();
+        // Read file into memory
+        byte[] data = null;
+        try {
+            data = Files.readAllBytes(file.toPath());
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            span.end();
+        }
+        return data;
+    }
+
     private void sendChecksum(DataOutputStream dOutputStream, MessageDigest md) throws IOException {
-        // SPAN: Start
-        Span span = tracer.spanBuilder("send_checksum").startSpan();
+        Span span = tracer.spanBuilder("send_checksum")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.CLIENT)
+                .startSpan();
         span.addEvent("checksum.start");
 
         // Send length of digest and contents
@@ -165,12 +226,12 @@ public class Client {
         span.setAttribute("checksum.length", digest.length);
         span.addEvent("checksum.end");
         span.end();
-        // SPAN: End
     }
 
     private void sendData(DataOutputStream dOutputStream, byte[] data) throws IOException {
-        // SPAN: Start
         Span span = tracer.spanBuilder("send_data")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.CLIENT)
                 .setAttribute("data.size.bytes", data.length)
                 .startSpan();
         span.addEvent("sending.start");
@@ -181,12 +242,13 @@ public class Client {
 
         span.addEvent("sending.end");
         span.end();
-        // SPAN: End
     }
 
     private byte[] encrypt(byte[] data, Cipher cipher) {
-        // SPAN: Start
-        Span span = tracer.spanBuilder("encrypt_file").startSpan();
+        Span span = tracer.spanBuilder("encrypt_file")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.CLIENT)
+                .startSpan();
         span.addEvent("encryption.start");
 
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
@@ -200,14 +262,14 @@ public class Client {
 
         span.addEvent("encryption.end");
         span.end();
-        // SPAN: End
+
         return byteArrayOutputStream.toByteArray();
     }
 
     private byte[] compress(byte[] data, MessageDigest md) {
-        // SPAN: Start
-
         Span span = tracer.spanBuilder("compress_file")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.CLIENT)
                 .setAttribute("original_size.bytes", data.length)
                 .startSpan();
         span.addEvent("compression.start");
@@ -233,9 +295,6 @@ public class Client {
         span.addEvent("compression.end");
         span.end();
         return compressed;
-
-        // SPAN: End
-        return byteArrayOutputStream.toByteArray();
     }
 
     public static void main(String[] args) {

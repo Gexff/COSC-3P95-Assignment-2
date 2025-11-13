@@ -12,7 +12,7 @@
  *
  * It is instantiated with a socket connection, and the transfer protocol is as follows:
  *
- *  1.) Server sends the SESSION_ID to the client.
+ *  1.) Server sends the TRACE_ID and SPAN_ID to the client.
  *
  *  2.) Client sends the name of the folder to store the transferred files in to the server as a String object.
  *
@@ -21,17 +21,19 @@
  *
  *  4.) For each file name in the ArrayList:
  *      Client side:
- *      i.) The client fully compresses the file data, then encrypts the data
- *      ii.) The client sends the length of the compressed/encrypted data to the Server,
+ *      i.) The client sends the SPAN_ID for the file span
+ *      ii.) The client fully compresses the file data, then encrypts the data
+ *      iii.) The client sends the length of the compressed/encrypted data to the Server,
  *          then sends the compressed/encrypted data.
- *      iii.) The client sends the checksum of the unencrypted file to the server, by first sending the length of the
+ *      iv.) The client sends the checksum of the unencrypted file to the server, by first sending the length of the
  *          checksum, followed by the checksum itself.
  *
  *      Server side:
- *      iv.) The server reads the length of the compressed/encrypted data, then reads the compressed/encrypted data itself.
- *      v.) The server decrypts the data, then decompresses it.
- *      vi.) The server reads the length of the checksum from the client, then reads the checksum itself.
- *      vii.) The server compares the checksum from the client to the checksum it calculates from the received data.
+ *      v.) The server reads the SPAN_ID for the file transfer
+ *      vi.) The server reads the length of the compressed/encrypted data, then reads the compressed/encrypted data itself.
+ *      vii.) The server decrypts the data, then decompresses it.
+ *      viii.) The server reads the length of the checksum from the client, then reads the checksum itself.
+ *      ix.) The server compares the checksum from the client to the checksum it calculates from the received data.
  */
 
 import javax.crypto.*;
@@ -44,13 +46,16 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.zip.InflaterOutputStream;
 
-import io.opentelemetry.api.GlobalOpenTelemetry;
-import io.opentelemetry.api.trace.Span;
-import io.opentelemetry.api.trace.SpanKind;
-import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.trace.*;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.metrics.LongCounter;
-import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.resources.Resource;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
+import io.opentelemetry.sdk.trace.samplers.Sampler;
 
 public class FolderTransferRequest implements Runnable {
     Socket client;
@@ -58,10 +63,26 @@ public class FolderTransferRequest implements Runnable {
     ObjectOutputStream oOutputStream;
     DataInputStream dInputStream;
     Cipher cipher;
-    String SESSION_ID;
 
-    private static final Tracer tracer = GlobalOpenTelemetry.getTracer("COSC3P95.Server");
-    private static final Meter meter = GlobalOpenTelemetry.meterBuilder("COSC3P95.Server").build();
+    private static final OtlpGrpcSpanExporter exporter = OtlpGrpcSpanExporter.builder()
+            .setEndpoint("http://localhost:4317")
+            .build();
+
+    private static final SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+            .addSpanProcessor(BatchSpanProcessor.builder(exporter).build())
+            .setResource(Resource.getDefault().toBuilder().put("service.name", "COSC3P95-Part1").build())
+            .setSampler(Sampler.alwaysOn())
+            .build();
+
+    private static final OpenTelemetrySdk openTelemetry = OpenTelemetrySdk.builder()
+            .setTracerProvider(tracerProvider)
+            .build();
+
+    private static final Tracer tracer =
+            openTelemetry.getTracer("file-transfer");
+
+    private static final Meter meter = openTelemetry.meterBuilder("COSC3P95.Server").build();
+
     private static final LongCounter filesReceivedCounter = meter
             .counterBuilder("files_received_total")
             .setDescription("Total number of files successfully received")
@@ -71,12 +92,14 @@ public class FolderTransferRequest implements Runnable {
             .setDescription("Number of files where checksum verification failed")
             .build();
 
+    static Span parentSpan;
+    static Span fileSpan;
+
     public FolderTransferRequest(Socket client) throws IOException, NoSuchPaddingException, NoSuchAlgorithmException, InvalidAlgorithmParameterException, InvalidKeyException {
         oInputStream = new ObjectInputStream(client.getInputStream());
         oOutputStream = new ObjectOutputStream(client.getOutputStream());
         dInputStream = new DataInputStream(client.getInputStream());
         this.client = client;
-        this.SESSION_ID = Server.generateSessionID(20);
 
         byte[] decodedKey = Base64.getDecoder().decode(Server.SECRET_KEY);
         SecretKey key = new SecretKeySpec(decodedKey, 0, decodedKey.length, "AES");
@@ -87,12 +110,17 @@ public class FolderTransferRequest implements Runnable {
 
     @Override
     public void run() {
+        parentSpan = tracer.spanBuilder("server_file_transfer")
+                .setSpanKind(SpanKind.SERVER)
+                .startSpan();
+
         String folder = null;
         ArrayList<String> fileNames = null;
 
-        // Send SESSION_ID to client
+        // Send Span context to client
         try {
-            oOutputStream.writeObject(SESSION_ID);
+            oOutputStream.writeObject(parentSpan.getSpanContext().getTraceId());
+            oOutputStream.writeObject(parentSpan.getSpanContext().getSpanId());
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -118,6 +146,7 @@ public class FolderTransferRequest implements Runnable {
 
         if(folder == null || fileNames == null){
             System.out.println("Something went wrong");
+            parentSpan.end();
             return;
         }
 
@@ -134,11 +163,18 @@ public class FolderTransferRequest implements Runnable {
             md = MessageDigest.getInstance("MD5");
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
+            parentSpan.end();
             return;
         }
 
         for(String fileName : fileNames){
             try {
+                // Read span ID
+                String spanId = (String) oInputStream.readObject();
+
+                fileSpan = Span.wrap(SpanContext.createFromRemoteParent(parentSpan.getSpanContext().getTraceId(),
+                        spanId, TraceFlags.getSampled(), TraceState.getDefault()));
+
                 // Read data length
                 int length = dInputStream.readInt();
 
@@ -166,42 +202,46 @@ public class FolderTransferRequest implements Runnable {
                     }
                 }
                 else{
-                    try(FileOutputStream fileOutputStream = new FileOutputStream(folder + "/" + fileName))
-                    {
-                        fileOutputStream.write(retrievedData);
-                    }
+                    writeToFile(retrievedData, folder + "/" + fileName, md);
                 }
+
+                oOutputStream.writeObject("sync");
 
                 System.out.println("Finished transferring: " + fileName + "\n");
 
             } catch (IOException e) {
                 e.printStackTrace();
+            } catch (ClassNotFoundException e) {
+                e.printStackTrace();
             }
         }
+
+        parentSpan.end();
+        openTelemetry.getSdkTracerProvider().forceFlush();
     }
 
     private boolean compareChecksums(byte[] clientDigest, byte[] serverDigest) {
-        // SPAN: Start
-
-        Span span = tracer.spanBuilder("checksum.compare").startSpan();
+        Span span = tracer.spanBuilder("checksum_compare")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.SERVER)
+                .startSpan();
         boolean result = false;
         try {
             result = MessageDigest.isEqual(clientDigest, serverDigest);
-            // SPAN: End
         } catch (Exception e) {
             span.recordException(e);
         } finally {
             span.setAttribute("checksum.result", result);
             span.end();
         }
-        // SPAN: End
         return result;
     }
 
     private byte[] readChecksum(DataInputStream dInputStream) throws IOException {
-        // SPAN: Start
-
-        Span span = tracer.spanBuilder("read.checksum").startSpan();
+        Span span = tracer.spanBuilder("read_checksum")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.SERVER)
+                .startSpan();
         byte[] digest;
         try {
             int length = dInputStream.readInt();
@@ -213,14 +253,14 @@ public class FolderTransferRequest implements Runnable {
             span.end();
         }
         return digest;
-
-        // SPAN: End
     }
 
     private void writeToFile(byte[] rawData, String file, MessageDigest md) throws IOException {
-        // SPAN: Start
-
-        Span span = tracer.spanBuilder("write.file").startSpan();
+        Span span = tracer.spanBuilder("write_file")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.SERVER)
+                .setAttribute("File_size", rawData.length)
+                .startSpan();
         ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(rawData);
         try(DigestInputStream digestInputStream = new DigestInputStream(byteArrayInputStream, md);
             FileOutputStream fileOutputStream = new FileOutputStream(file))
@@ -238,14 +278,13 @@ public class FolderTransferRequest implements Runnable {
         } finally {
             span.end();
         }
-
-        // SPAN: End
     }
 
     private byte[] decompress(byte[] data) {
-        // SPAN: Start
-
-        Span span = tracer.spanBuilder("decompress.data").startSpan();
+        Span span = tracer.spanBuilder("decompress_data")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.SERVER)
+                .startSpan();
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
         try(InflaterOutputStream inflaterOutputStream = new InflaterOutputStream(byteArrayOutputStream))
         {
@@ -258,12 +297,14 @@ public class FolderTransferRequest implements Runnable {
             span.end();
         }
 
-        // SPAN: End
         return byteArrayOutputStream.toByteArray();
     }
 
     private byte[] decrypt(byte[] data, Cipher cipher) {
-        // SPAN: Start
+        Span span = tracer.spanBuilder("decrypt_data")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.SERVER)
+                .startSpan();
 
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
         try(CipherOutputStream cipherOutputStream = new CipherOutputStream(byteArrayOutputStream, cipher))
@@ -277,12 +318,14 @@ public class FolderTransferRequest implements Runnable {
             span.end();
         }
 
-        // SPAN: End
         return byteArrayOutputStream.toByteArray();
     }
 
     private byte[] readData(DataInputStream dInputStream, int length) throws IOException {
-        Span span = tracer.spanBuilder("read.data").startSpan();
+        Span span = tracer.spanBuilder("read_data")
+                .setParent(Context.current().with(fileSpan))
+                .setSpanKind(SpanKind.SERVER)
+                .startSpan();
         byte[] retrievedData = new byte[length];
 
         // Read data
