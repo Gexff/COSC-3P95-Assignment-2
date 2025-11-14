@@ -68,6 +68,7 @@ public class Client {
     DataOutputStream dOutputStream;
     Cipher cipher;
     ByteArrayOutputStream byteArrayOutputStream;
+    PredicateLogger logger = new PredicateLogger("run_" + System.currentTimeMillis() + ".txt");
 
     private static final OtlpGrpcSpanExporter exporter = OtlpGrpcSpanExporter.builder()
             .setEndpoint("http://localhost:4317")
@@ -185,10 +186,13 @@ public class Client {
             oOutputStream.close();
             dOutputStream.close();
         } catch (UnknownHostException e) {
+            logger.markException();
             e.printStackTrace();
         } catch (IOException e) {
+            logger.markException();
             e.printStackTrace();
         } finally {
+            logger.finalizeLog();
             openTelemetry.getSdkTracerProvider().shutdown();
         }
     }
@@ -203,6 +207,7 @@ public class Client {
         try {
             data = Files.readAllBytes(file.toPath());
         } catch (IOException e) {
+            logger.markException();
             e.printStackTrace();
         } finally {
             span.end();
@@ -258,6 +263,7 @@ public class Client {
         } catch (IOException e) {
             e.printStackTrace();
             span.recordException(e);
+            logger.markException();
         }
 
         span.addEvent("encryption.end");
@@ -283,6 +289,7 @@ public class Client {
         } catch (IOException e) {
             e.printStackTrace();
             span.recordException(e);
+            logger.markException();
         }
 
         byte[] compressed = byteArrayOutputStream.toByteArray();
@@ -296,16 +303,26 @@ public class Client {
         span.setAttribute("pred.compression_ratio_gt_2_087", ratio > 2.087);
         span.setAttribute("pred.compression_ratio_lt_2_087", ratio < 2.087);
 
+        logger.log("----------------------------------");
+        logger.log("pred.compression_ratio_gt_2_08=" + (ratio > 2.08));
+        logger.log("pred.compression_ratio_gt_2_085=" + (ratio > 2.085));
+        logger.log("pred.compression_ratio_gt_2_087=" + (ratio > 2.087));
+        logger.log("pred.compression_ratio_lt_2_087=" + (ratio < 2.087));
+
         boolean isLargeFile = data.length > 10L * 1024L * 1024L; // > 10MB
         span.setAttribute("pred.file_size_gt_10MB", isLargeFile);
+        logger.log("pred.file_size_gt_10MB=" + isLargeFile);
 
         // Bug
         boolean corrupted = false;
         if (ratio > 2.0875 && compressed.length > 0) {
             compressed[0] ^= 0x01;  // flip lowest bit of first byte
             corrupted = true;
+            logger.markException();   // ← count bug as failure
         }
         span.setAttribute("bug.corrupted", corrupted);
+        logger.log("bug.corrupted=" + corrupted);
+        logger.log("----------------------------------");
 
         compressionRatioHistogram.record(ratio);
 
