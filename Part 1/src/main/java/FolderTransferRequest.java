@@ -42,6 +42,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.Socket;
 import java.security.*;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.zip.InflaterOutputStream;
@@ -50,8 +51,11 @@ import io.opentelemetry.api.trace.*;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.context.Context;
+import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
@@ -68,20 +72,33 @@ public class FolderTransferRequest implements Runnable {
             .setEndpoint("http://localhost:4317")
             .build();
 
+    private static final OtlpGrpcMetricExporter metricExporter = OtlpGrpcMetricExporter.builder()
+            .setEndpoint("http://localhost:4317")
+            .build();
+
+    static Resource app = Resource.getDefault().toBuilder().put("service.name", "COSC3P95-Part1").build();
+
     private static final SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
             .addSpanProcessor(BatchSpanProcessor.builder(exporter).build())
-            .setResource(Resource.getDefault().toBuilder().put("service.name", "COSC3P95-Part1").build())
+            .setResource(app)
             .setSampler(Sampler.alwaysOn())
+            .build();
+    private static final SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .setResource(app)
+            .registerMetricReader(PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build())
             .build();
 
     private static final OpenTelemetrySdk openTelemetry = OpenTelemetrySdk.builder()
             .setTracerProvider(tracerProvider)
+            .setMeterProvider(meterProvider)
             .build();
 
     private static final Tracer tracer =
             openTelemetry.getTracer("file-transfer");
 
-    private static final Meter meter = openTelemetry.meterBuilder("COSC3P95.Server").build();
+    private static final Meter meter = openTelemetry.getMeter("file-transfer-metrics");
 
     private static final LongCounter filesReceivedCounter = meter
             .counterBuilder("files_received_total")
@@ -199,6 +216,7 @@ public class FolderTransferRequest implements Runnable {
                         System.out.println("MD5 Checksum matched for file: " + fileName);
                     } else {
                         System.out.println("MD5 Checksum DID NOT MATCH for file: " + fileName);
+                        checksumFailCounter.add(1);
                     }
                 }
                 else{
@@ -208,6 +226,7 @@ public class FolderTransferRequest implements Runnable {
                 oOutputStream.writeObject("sync");
 
                 System.out.println("Finished transferring: " + fileName + "\n");
+                filesReceivedCounter.add(1);
 
             } catch (IOException e) {
                 e.printStackTrace();
@@ -218,6 +237,7 @@ public class FolderTransferRequest implements Runnable {
 
         parentSpan.end();
         openTelemetry.getSdkTracerProvider().forceFlush();
+        openTelemetry.getSdkMeterProvider().forceFlush();
     }
 
     private boolean compareChecksums(byte[] clientDigest, byte[] serverDigest) {
