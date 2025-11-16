@@ -42,6 +42,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.Socket;
 import java.security.*;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.zip.InflaterOutputStream;
@@ -50,8 +51,11 @@ import io.opentelemetry.api.trace.*;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.context.Context;
+import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
@@ -68,14 +72,27 @@ public class FolderTransferRequest implements Runnable {
             .setEndpoint("http://localhost:4317")
             .build();
 
+    private static final OtlpGrpcMetricExporter metricExporter = OtlpGrpcMetricExporter.builder()
+            .setEndpoint("http://localhost:4317")
+            .build();
+
+    static Resource app = Resource.getDefault().toBuilder().put("service.name", "COSC3P95-Part2").build();
+
     private static final SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
             .addSpanProcessor(BatchSpanProcessor.builder(exporter).build())
-            .setResource(Resource.getDefault().toBuilder().put("service.name", "COSC3P95-Part2").build())
+            .setResource(app)
             .setSampler(Sampler.alwaysOn())
+            .build();
+    private static final SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+            .setResource(app)
+            .registerMetricReader(PeriodicMetricReader.builder(metricExporter)
+                    .setInterval(Duration.ofSeconds(2))
+                    .build())
             .build();
 
     private static final OpenTelemetrySdk openTelemetry = OpenTelemetrySdk.builder()
             .setTracerProvider(tracerProvider)
+            .setMeterProvider(meterProvider)
             .build();
 
     private static final Tracer tracer =
