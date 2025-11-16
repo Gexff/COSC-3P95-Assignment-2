@@ -60,8 +60,11 @@ GenerateFiles.java takes in the name of the folder to place the generated files 
 To provide program arguments in IntelliJ, you must edit the run configuration and provide the arguments there:
 ![IntelliJ Run Configuration](images/RunConfig.PNG)
 
+**Use GenerateFile.java to create test data. Then run Server.java, followed by Client.java. The Server must be running before the Client, or else the Client will timeout and terminate execution.**
+
 ## Part 2
 The steps to run the main application for Part 2 are the same, except open the Part 2/ folder as its own IntelliJ project, and follow the same steps defined for Part 1.
+
 
 
 
