@@ -162,11 +162,23 @@ public class Client {
                         .setAttribute("File.number", number++)
                         .startSpan();
 
+                logger.log("----------------------------------");
+                boolean isFileNumberlt10 = number < 10; // < 10
+                fileSpan.setAttribute("pred.file_no_lt_10", isFileNumberlt10);
+                logger.log("pred.file_no_lt_10=" + isFileNumberlt10);
+
+                boolean isFileNumbergt10 = number > 10; // > 10
+                fileSpan.setAttribute("pred.file_no_gt_10", isFileNumbergt10);
+                logger.log("pred.file_no_gt_10=" + isFileNumbergt10);
+
                 oOutputStream.writeObject(fileSpan.getSpanContext().getSpanId());
 
                 byte[] data = readFile(file);
 
                 if(Server.USE_ADVANCED_FEATURES){
+                    fileSpan.setAttribute("pred.USE_ADVANCED_FEATURES", Server.USE_ADVANCED_FEATURES);
+                    logger.log("pred.USE_ADVANCED_FEATURES=" + Server.USE_ADVANCED_FEATURES);
+
                     byte[] compressedData = compress(data, md);
                     byte[] encryptedCompressedData = encrypt(compressedData, cipher);
                     sendData(dOutputStream, encryptedCompressedData);
@@ -224,6 +236,13 @@ public class Client {
 
         // Send length of digest and contents
         byte[] digest = md.digest();
+
+        boolean Client_compareMD5 = md.getAlgorithm().equals("MD5");
+        boolean Client_compareSHA256 = md.getAlgorithm().equals("SHA_256");
+        span.setAttribute("pred.algorithm_MD5", Client_compareMD5);
+        logger.log("pred.algorithm_MD5=" + Client_compareMD5);
+        span.setAttribute("pred.algorithm_SHA_256", Client_compareSHA256);
+        logger.log("pred.algorithm_SHA_256=" + Client_compareSHA256);
         dOutputStream.writeInt(digest.length);
         dOutputStream.write(digest, 0, digest.length);
         dOutputStream.flush();
@@ -240,6 +259,22 @@ public class Client {
                 .setAttribute("data.size.bytes", data.length)
                 .startSpan();
         span.addEvent("sending.start");
+
+        boolean isLargeFilelt5MB = data.length < 5L * 1024L * 1024L; // < 5MB
+        span.setAttribute("pred.file_size_lt_5MB", isLargeFilelt5MB);
+        logger.log("pred.file_size_lt_5MB=" + isLargeFilelt5MB);
+
+        boolean isLargeFilegt5MB = data.length > 5L * 1024L * 1024L; // > 5MB
+        span.setAttribute("pred.file_size_gt_5MB", isLargeFilegt5MB);
+        logger.log("pred.file_size_gt_5MB=" + isLargeFilegt5MB);
+
+        boolean isLargeFilelt10MB = data.length < 10L * 1024L * 1024L; // < 10MB
+        span.setAttribute("pred.file_size_lt_10MB", isLargeFilelt10MB);
+        logger.log("pred.file_size_lt_10MB=" + isLargeFilelt10MB);
+
+        boolean isLargeFilegt10MB = data.length > 10L * 1024L * 1024L; // > 10MB
+        span.setAttribute("pred.file_size_gt_10MB", isLargeFilegt10MB);
+        logger.log("pred.file_size_gt_10MB=" + isLargeFilegt10MB);
 
         // Send data length and contents
         dOutputStream.writeInt(data.length);
@@ -299,30 +334,31 @@ public class Client {
 
         span.setAttribute("compression.ratio", ratio);
         span.setAttribute("pred.compression_ratio_gt_2_08",  ratio > 2.08);
-        span.setAttribute("pred.compression_ratio_gt_2_085", ratio > 2.085);
-        span.setAttribute("pred.compression_ratio_gt_2_087", ratio > 2.087);
-        span.setAttribute("pred.compression_ratio_lt_2_087", ratio < 2.087);
-
-        logger.log("----------------------------------");
         logger.log("pred.compression_ratio_gt_2_08=" + (ratio > 2.08));
+        span.setAttribute("pred.compression_ratio_gt_2_085", ratio > 2.085);
         logger.log("pred.compression_ratio_gt_2_085=" + (ratio > 2.085));
+        span.setAttribute("pred.compression_ratio_gt_2_087", ratio > 2.087);
         logger.log("pred.compression_ratio_gt_2_087=" + (ratio > 2.087));
-        logger.log("pred.compression_ratio_lt_2_087=" + (ratio < 2.087));
-
-        boolean isLargeFile = data.length > 10L * 1024L * 1024L; // > 10MB
-        span.setAttribute("pred.file_size_gt_10MB", isLargeFile);
-        logger.log("pred.file_size_gt_10MB=" + isLargeFile);
+        span.setAttribute("pred.compression_ratio_gt_2_0875", ratio > 2.0875);
+       logger.log("pred.compression_ratio_gt_2_0875=" + (ratio > 2.0875));
+        span.setAttribute("pred.compression_ratio_gt_2_08751", ratio > 2.08751);
+        logger.log("pred.compression_ratio_gt_2_08751=" + (ratio > 2.08751));
+        span.setAttribute("pred.compression_ratio_gt_2_08752", ratio > 2.08752);
+        logger.log("pred.compression_ratio_gt_2_08752=" + (ratio > 2.08752));
+        span.setAttribute("pred.compression_ratio_gt_2_08753", ratio > 2.087523);
+        logger.log("pred.compression_ratio_gt_2_08753=" + (ratio > 2.08753));
+        span.setAttribute("pred.compression_ratio_gt_2_08754", ratio > 2.08754);
+        logger.log("pred.compression_ratio_gt_2_08754=" + (ratio > 2.08754));
 
         // Bug
         boolean corrupted = false;
-        if (ratio > 2.0875 && compressed.length > 0) {
+        if (ratio > 2.087535 && compressed.length > 0) {
             compressed[0] ^= 0x01;  // flip lowest bit of first byte
             corrupted = true;
-            logger.markException();   // ← count bug as failure
+            logger.markException();
         }
         span.setAttribute("bug.corrupted", corrupted);
         logger.log("bug.corrupted=" + corrupted);
-        logger.log("----------------------------------");
 
         compressionRatioHistogram.record(ratio);
 
